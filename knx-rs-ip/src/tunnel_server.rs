@@ -10,7 +10,7 @@
 use std::borrow::Cow;
 use std::collections::VecDeque;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
-
+use std::ops::Deref;
 use knx_rs_core::address::IndividualAddress;
 use knx_rs_core::cemi::CemiFrame;
 use knx_rs_core::knxip::dib::{
@@ -30,7 +30,7 @@ use crate::router::{KNX_MULTICAST_ADDR, KNX_PORT};
 use crate::tunnel::{MAX_RETRIES, RECV_BUF_SIZE, REQUEST_TIMEOUT};
 
 /// Maximum simultaneous tunnel connections.
-const MAX_TUNNELS: usize = 16;
+const MAX_TUNNELS: usize = 128;
 
 /// Tunnel timeout: close if no heartbeat in 120 seconds (per KNX spec).
 const TUNNEL_TIMEOUT_SECS: u64 = 120;
@@ -177,7 +177,10 @@ impl DeviceDescription {
     /// search of version 2: it has nothing else of version 2 (TCP connections,
     /// secure sessions), and a client that sees version 2 expects them.
     fn families(routing: bool) -> Vec<(ServiceFamily, u8)> {
-        let mut families = vec![(ServiceFamily::Core, 1), (ServiceFamily::Tunneling, 1)];
+        let mut families = vec![
+            (ServiceFamily::Core, 1),
+//            (ServiceFamily::DeviceManagement, 1),
+            (ServiceFamily::Tunneling, 1)];
         if routing {
             families.push((ServiceFamily::Routing, 1));
         }
@@ -728,12 +731,15 @@ async fn handle_packet(data: &[u8], src: SocketAddr, socket: &UdpSocket, state: 
             }
         }
         ServiceType::ConnectRequest => {
+            let server_individual_address = state.description.borrow().clone()
+                .map(|d| d.individual_address);
             handle_connect(
                 socket,
                 src,
                 &frame,
                 &mut state.tunnels,
                 &mut state.next_channel_id,
+                server_individual_address
             )
             .await;
         }
@@ -894,18 +900,23 @@ async fn handle_connect(
     frame: &KnxIpFrame,
     tunnels: &mut Vec<TunnelClient>,
     next_channel_id: &mut u8,
+    server_individual_address: Option<IndividualAddress>,
 ) {
-    if frame.body.len() < 20 {
+    tracing::debug!("ConnectRequest");
+    if frame.body.len() < 18 {
+        tracing::debug!("ConnectRequest 1: {}", frame.body.len());
         return;
     }
 
     // Parse control and data HPAI. IPv6 peers are represented by standard
     // KNXnet/IP NAT-mode HPAI (0.0.0.0:port) and authenticated by `src`.
     let Some(ctrl_hpai) = Hpai::parse(&frame.body) else {
+        tracing::debug!("ConnectRequest 2");
         return;
     };
     let data_offset = usize::from(Hpai::LEN);
     let Some(data_hpai) = Hpai::parse(&frame.body[data_offset..]) else {
+        tracing::debug!("ConnectRequest 3");
         return;
     };
 
@@ -920,19 +931,12 @@ async fn handle_connect(
 
     // Only tunnel connections are supported; reject device-management (and any
     // other) connection types explicitly rather than mis-handling them as tunnels.
-    if conn_type == DEVICE_MGMT_CONNECTION {
-        tracing::debug!(%ctrl_addr, "rejecting device-management connection");
-        if let Some(resp) = build_connect_response(0, E_CONNECTION_TYPE, 0, port) {
-            let _ = socket.send_to(&resp, ctrl_addr).await;
-        }
-        return;
-    }
-
     if tunnels.len() >= MAX_TUNNELS {
         // No more connections available
         if let Some(resp) = build_connect_response(0, E_NO_MORE_CONNECTIONS, 0, port) {
             let _ = socket.send_to(&resp, ctrl_addr).await;
         }
+        tracing::debug!("ConnectRequest 4");
         return;
     }
 
@@ -947,6 +951,7 @@ async fn handle_connect(
         attempts += 1;
         if attempts > 255 {
             // All channel IDs exhausted — reject connection
+            tracing::debug!("ConnectRequest 5");
             return;
         }
     }
@@ -964,7 +969,18 @@ async fn handle_connect(
 
     tracing::info!(channel_id, %ctrl_addr, "tunnel client connected");
 
-    let assigned_ia = TUNNEL_IA_BASE | u16::from(channel_id);
+
+    if conn_type == DEVICE_MGMT_CONNECTION {
+        tracing::debug!(%ctrl_addr, "rejecting device-management connection");
+        if let Some(resp) = build_management_connect_response(channel_id, E_NO_ERROR, port) {
+            let _ = socket.send_to(&resp, ctrl_addr).await;
+        }
+        return;
+    }
+
+    let assigned_ia = server_individual_address
+        .map( |a| {a.raw()})
+        .unwrap_or(TUNNEL_IA_BASE | u16::from(channel_id));
     if let Some(resp) = build_connect_response(channel_id, E_NO_ERROR, assigned_ia, port) {
         let _ = socket.send_to(&resp, ctrl_addr).await;
     }
@@ -1006,6 +1022,27 @@ fn build_connect_response(
     body.push(status);
     body.extend_from_slice(&hpai.to_bytes());
     body.extend_from_slice(&tunnel_crd(individual_addr));
+
+    let frame = KnxIpFrame {
+        service_type: ServiceType::ConnectResponse,
+        body,
+    };
+    serialize_frame(&frame)
+}
+
+fn build_management_connect_response(
+    channel_id: u8,
+    status: u8,
+    port: u16,
+) -> Option<Vec<u8>> {
+    let hpai = Hpai::nat_udp(port);
+    let mut body = Vec::with_capacity(10);
+    body.push(channel_id);
+    body.push(status);
+    body.extend_from_slice(&hpai.to_bytes());
+    // CRD Device Management Connection
+    body.push(0x02); // Structure Length: 2 bytes
+    body.push(0x03); // Connection Type: Device Management Connection (0x03)
 
     let frame = KnxIpFrame {
         service_type: ServiceType::ConnectResponse,

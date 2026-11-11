@@ -11,14 +11,16 @@
 //!
 //! Usage: `knx-demo-device [--address 1.1.10]`
 
-use std::net::Ipv4Addr;
-
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use knx_rs_core::address::IndividualAddress;
 use knx_rs_core::dpt::DptValue;
+use knx_rs_core::knxip::dib::KnxMedium;
 use knx_rs_device::bau::Bau;
 use knx_rs_device::group_object::ComFlag;
 use knx_rs_ip::tunnel_server::{DeviceServer, ServerEvent};
 
 use knx_rs_demo_device::create_demo_bau;
+use knx_rs_ip::DeviceDescription;
 
 fn log_updated_group_objects(bau: &mut Bau) {
     while let Some(asap) = bau.group_objects_mut().next_updated() {
@@ -98,7 +100,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let address = args
         .windows(2)
         .find(|w| w[0] == "--address")
-        .map_or(0xFFFF, |w| parse_address(&w[1]));
+        .map_or(0x11E1, |w| parse_address(&w[1]));
 
     let mut bau = create_demo_bau(address);
 
@@ -111,7 +113,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!("  GO 3: Dimmer      (1/0/3, DPT 5.001) — receives percentage");
     tracing::info!("  GO 4: Text        (1/0/4, DPT 16.001) — receives string");
 
-    let server = DeviceServer::start(Ipv4Addr::UNSPECIFIED).await?;
+    // ETS device description.
+    let mut description = DeviceDescription::new(
+        "KNX IP",
+        IndividualAddress::from_raw(0x11e1),
+        [0x01, 0x9e, 0x00, 0x00, 0x00, 0x00],
+        [0x52, 0x54, 0x00, 0x24, 0x27, 0xba],
+    );
+
+    description.medium = KnxMedium::Ip;
+
+
+    // Start KNXnet/IP server.
+    let mut server =
+        DeviceServer::start_with(
+            Ipv4Addr::UNSPECIFIED,
+            description,
+        )
+            .await?;
     tracing::info!("Device server listening on port 3671");
 
     let mut temp_interval = tokio::time::interval(tokio::time::Duration::from_secs(5));

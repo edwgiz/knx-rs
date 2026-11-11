@@ -1,0 +1,15 @@
+[target.x86_64-unknown-linux-gnu]
+linker = "cc"
+rustflags = [
+    "-C", "link-arg=-L/usr/lib/x86_64-linux-gnu",
+    "-C", "link-arg=-fuse-ld=bfd"
+]
+
+
+[target.armv7-unknown-linux-gnueabihf]
+linker = "/opt/toolchains/gcc-linaro-6.3.1-2017.02-i686_arm-linux-gnueabihf/bin/arm-linux-gnueabihf-gcc"
+rustflags = [
+    "-C", "target-cpu=cortex-a9",
+    "-C", "link-arg=-Wl,--gc-sections",
+    "-C", "debuginfo=0"
+]
