@@ -30,7 +30,7 @@ use crate::router::{KNX_MULTICAST_ADDR, KNX_PORT};
 use crate::tunnel::{MAX_RETRIES, RECV_BUF_SIZE, REQUEST_TIMEOUT};
 
 /// Maximum simultaneous tunnel connections.
-const MAX_TUNNELS: usize = 4;
+const MAX_TUNNELS: usize = 16;
 
 /// Tunnel timeout: close if no heartbeat in 120 seconds (per KNX spec).
 const TUNNEL_TIMEOUT_SECS: u64 = 120;
